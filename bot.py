@@ -4,19 +4,18 @@ import requests
 import os
 from flask import Flask
 from threading import Thread
-import tiktok_service  # Import module xử lý bên trên
+import tiktok_service  # Module xử lý API
 
 # =====================================================
-# PHẦN 1: CẤU HÌNH SERVER ẢO (Để chạy 24/7 Free)
+# PHẦN 1: SERVER ẢO
 # =====================================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "<h1>Bot đang chạy ngon lành! (24/7)</h1>"
+    return "<h1>Bot Status: ONLINE ✅</h1>"
 
 def run_web():
-    # Render sẽ cấp port qua biến môi trường, mặc định là 8080 nếu chạy local
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -25,22 +24,17 @@ def keep_alive():
     t.start()
 
 # =====================================================
-# PHẦN 2: LOGIC BOT TELEGRAM
+# PHẦN 2: LOGIC BOT & TIẾN TRÌNH
 # =====================================================
 
-# Lấy Token bảo mật từ biến môi trường
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 if not BOT_TOKEN:
-    # Token dự phòng khi chạy test trên máy (Nhớ xóa khi deploy thật)
-    BOT_TOKEN = "TOKEN_CỦA_BẠN_DÁN_VÀO_ĐÂY_NẾU_TEST_LOCAL"
+    BOT_TOKEN = "TOKEN_TEST_CUA_BAN"
 
 bot = telebot.TeleBot(BOT_TOKEN)
-MAX_FILE_SIZE = 48 * 1024 * 1024  # Giới hạn 48MB để an toàn
-
-# Cache tạm để lưu link nhạc (Dùng cho nút bấm)
+MAX_FILE_SIZE = 48 * 1024 * 1024
 msg_cache = {}
 
-# Hàm tạo nút tải nhạc
 def create_music_btn(vid_id):
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("🎵 Tải Nhạc (Audio)", callback_data=f"aud_{vid_id}"))
@@ -50,7 +44,7 @@ def create_music_btn(vid_id):
 def send_welcome(message):
     bot.reply_to(message, 
                  "👋 **Chào bạn!**\n"
-                 "Gửi link TikTok (Video hoặc Slide ảnh) vào đây, mình sẽ tải bản đẹp nhất cho bạn.",
+                 "Gửi link TikTok vào đây để xem tiến trình xử lý nhé!",
                  parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: True)
@@ -61,44 +55,60 @@ def handle_tiktok(message):
         bot.reply_to(message, "⚠️ Link không hợp lệ.")
         return
 
-    # Gửi tin nhắn chờ
-    wait_msg = bot.reply_to(message, "🔎 Đang xử lý dữ liệu...")
+    # [BƯỚC 1] BẮT ĐẦU
+    status_msg = bot.reply_to(message, "🔎 **Bước 1/3:** Đang kết nối API TikTok...", parse_mode="Markdown")
 
     # Gọi Service
     data = tiktok_service.get_tiktok_data(url)
 
     if not data:
-        bot.edit_message_text("❌ Không tìm thấy nội dung. Link có thể bị lỗi hoặc Private.", 
-                              chat_id=message.chat.id, message_id=wait_msg.message_id)
+        bot.edit_message_text("❌ **Lỗi:** Không tìm thấy nội dung. Link hỏng hoặc Private.", 
+                              chat_id=message.chat.id, message_id=status_msg.message_id, parse_mode="Markdown")
         return
 
-    # Lưu link nhạc vào cache
+    # Lưu cache
     msg_cache[data['id']] = data['music']
     
     caption = f"🎬 **{data['title']}**\n👤 Kênh: {data['author']}\n🤖 Bot by Quoc Dong"
 
     try:
-        # --- TRƯỜNG HỢP 1: VIDEO ---
+        # --- XỬ LÝ VIDEO ---
         if data['type'] == 'video':
-            # Tải về RAM trước
-            video_content = requests.get(data['video_url']).content
+            # [BƯỚC 2] TẢI VỀ SERVER
+            bot.edit_message_text(f"⬇️ **Bước 2/3:** Đang tải video về Server...\n(Video: {data['title'][:20]}...)",
+                                  chat_id=message.chat.id, message_id=status_msg.message_id, parse_mode="Markdown")
+            
+            # Tải nội dung
+            video_response = requests.get(data['video_url'])
+            video_content = video_response.content
             
             if len(video_content) > MAX_FILE_SIZE:
-                bot.edit_message_text(f"⚠️ Video quá nặng. [Tải tại đây]({data['video_url']})",
-                                      chat_id=message.chat.id, message_id=wait_msg.message_id, parse_mode="Markdown")
-            else:
-                bot.delete_message(message.chat.id, wait_msg.message_id)
-                bot.send_video(
-                    message.chat.id, 
-                    video_content, 
-                    caption=caption,
-                    parse_mode="Markdown",
-                    reply_markup=create_music_btn(data['id']) # Luôn có nút nhạc
-                )
+                bot.edit_message_text(f"⚠️ Video quá nặng (>50MB). Telegram không cho gửi.\n🔗 [Bấm vào đây tải trực tiếp]({data['video_url']})",
+                                      chat_id=message.chat.id, message_id=status_msg.message_id, parse_mode="Markdown")
+                return
 
-        # --- TRƯỜNG HỢP 2: SLIDE ẢNH ---
+            # [BƯỚC 3] UPLOAD LÊN TELEGRAM
+            bot.edit_message_text("⬆️ **Bước 3/3:** Đang gửi video cho bạn...", 
+                                  chat_id=message.chat.id, message_id=status_msg.message_id, parse_mode="Markdown")
+
+            # Gửi file
+            bot.send_video(
+                message.chat.id, 
+                video_content, 
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=create_music_btn(data['id'])
+            )
+            
+            # Xóa tin nhắn trạng thái khi xong
+            bot.delete_message(message.chat.id, status_msg.message_id)
+
+        # --- XỬ LÝ SLIDE ẢNH ---
         elif data['type'] == 'slide':
-            # Telegram cho phép tối đa 10 ảnh/nhóm
+            # Với Slide thì nhanh hơn nên gộp bước
+            bot.edit_message_text("📸 **Đang xử lý Album ảnh...**", 
+                                  chat_id=message.chat.id, message_id=status_msg.message_id, parse_mode="Markdown")
+            
             album = []
             for i, img_url in enumerate(data['images'][:10]):
                 if i == 0:
@@ -106,16 +116,16 @@ def handle_tiktok(message):
                 else:
                     album.append(InputMediaPhoto(img_url))
             
-            bot.delete_message(message.chat.id, wait_msg.message_id)
             bot.send_media_group(message.chat.id, album)
-            # Vì Album không gắn nút được, nên gửi nút nhạc riêng ngay bên dưới
             bot.send_message(message.chat.id, "👇 Nhạc nền của Slide:", reply_markup=create_music_btn(data['id']))
+            
+            # Xóa tin nhắn chờ
+            bot.delete_message(message.chat.id, status_msg.message_id)
 
     except Exception as e:
         print(f"Lỗi: {e}")
-        bot.edit_message_text("❌ Có lỗi khi gửi file.", chat_id=message.chat.id, message_id=wait_msg.message_id)
+        bot.edit_message_text("❌ Lỗi hệ thống khi gửi file.", chat_id=message.chat.id, message_id=status_msg.message_id)
 
-# Xử lý khi bấm nút tải nhạc
 @bot.callback_query_handler(func=lambda call: True)
 def callback_music(call):
     if call.data.startswith("aud_"):
@@ -123,7 +133,8 @@ def callback_music(call):
         music_url = msg_cache.get(vid_id)
         
         if music_url:
-            bot.answer_callback_query(call.id, "🚀 Đang tải nhạc...")
+            # Thông báo nhỏ dạng Toast (hiện lên rồi tắt)
+            bot.answer_callback_query(call.id, "🚀 Đang tải nhạc, đợi xíu...")
             try:
                 bot.send_audio(call.message.chat.id, music_url, caption="🎵 Audio Extracted")
             except:
@@ -132,8 +143,8 @@ def callback_music(call):
             bot.answer_callback_query(call.id, "❌ Link hết hạn.")
 
 # =====================================================
-# PHẦN 3: CHẠY (MAIN)
+# MAIN
 # =====================================================
 if __name__ == "__main__":
-    keep_alive()  # Bật Web Server giả
-    bot.infinity_polling() # Bật Bot
+    keep_alive()
+    bot.infinity_polling()
